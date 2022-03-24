@@ -1,5 +1,6 @@
 #include <yaml-cpp/yaml.h>
 
+#include <Eigen/Dense>
 #include <cassert>
 #include <iostream>
 #include <opencv2/core/core.hpp>
@@ -8,7 +9,15 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
-int main(int argc, char** argv) {
+Eigen::Vector3f triangulate(const cv::KeyPoint &p1, const cv::KeyPoint &p2,
+                            const Eigen::Matrix<float, 3, 4> &P1,
+                            const Eigen::Matrix<float, 3, 4> &P2);
+
+int checkRT(const Eigen::Matrix3f &R, const Eigen::Vector3f &t, const Eigen::Matrix3f &K,
+            const std::vector<cv::DMatch> &matches, const std::vector<cv::KeyPoint> &keypoints1,
+            const std::vector<cv::KeyPoint> &keypoints2);
+
+int main(int argc, char **argv) {
   cv::Mat image1, image2;
   image1 = cv::imread(argv[1], 0);
   image2 = cv::imread(argv[2], 0);
@@ -17,7 +26,7 @@ int main(int argc, char** argv) {
   // 1. 遍历图像
   cv::Mat image1_clone = image1.clone();
   for (size_t y = 0; y < image1_clone.rows; y++) {
-    unsigned char* row_ptr = image1_clone.ptr<unsigned char>(y);
+    unsigned char *row_ptr = image1_clone.ptr<unsigned char>(y);
     for (size_t x = 0; x < image1_clone.cols; x++) {
       row_ptr[x] = 255 - row_ptr[x];
     }
@@ -28,7 +37,7 @@ int main(int argc, char** argv) {
   YAML::Node config;
   try {
     config = YAML::LoadFile(argv[3]);
-  } catch (YAML::BadFile& e) {
+  } catch (YAML::BadFile &e) {
     std::cout << "read error!" << std::endl;
     return -1;
   }
@@ -38,6 +47,8 @@ int main(int argc, char** argv) {
 
   const cv::Mat K = (cv::Mat_<float>(3, 3) << intrinsics[0], 0, intrinsics[2], 0, intrinsics[1],
                      intrinsics[3], 0, 0, 1);
+  Eigen::Matrix3f K_eigen;
+  K_eigen << intrinsics[0], 0, intrinsics[2], 0, intrinsics[1], intrinsics[3], 0, 0, 1;
   const cv::Mat D = cv::Mat(distortion_coefficients);
   // std::cout << K << std::endl;
   // std::cout << D << std::endl;
@@ -111,5 +122,157 @@ int main(int argc, char** argv) {
               img_RR_matches);
   cv::imwrite("消除误匹配点后.png", img_RR_matches);
 
+  // 4 八点法求相机pose
+
+  // 4.1 构建方程组，使用SVD分解求基础矩阵
+  // 实践中一般需要归一化特征点到统一尺度并做RANSAC迭代，本代码目前只是最小实现
+  Eigen::Matrix<float, 8, 9> A;
+  Eigen::Matrix<float, 9, 1> x;
+  for (int i = 0; i < 8; i++) {
+    const float u1 = RR_keypoint01[i].pt.x;
+    const float v1 = RR_keypoint01[i].pt.y;
+    const float u2 = RR_keypoint02[i].pt.x;
+    const float v2 = RR_keypoint02[i].pt.y;
+
+    A(i, 0) = u2 * u1;
+    A(i, 1) = u2 * v1;
+    A(i, 2) = u2;
+    A(i, 3) = v2 * u1;
+    A(i, 4) = v2 * v1;
+    A(i, 5) = v2;
+    A(i, 6) = u1;
+    A(i, 7) = v1;
+    A(i, 8) = 1;
+  }
+
+  Eigen::JacobiSVD<Eigen::MatrixXf> svd(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  auto V = svd.matrixV();
+  // 最小奇异值对应的右向量
+  Eigen::Matrix<float, 9, 1> Fv = V.col(8);
+  Eigen::Matrix<float, 3, 3> Fpre;
+  Fpre << Fv(0), Fv(1), Fv(2), Fv(3), Fv(4), Fv(5), Fv(6), Fv(7), Fv(8);
+  // std::cout << Fpre << std::endl << std::endl;
+
+  // 基础矩阵秩为2，再次对F进行奇异值分解强制其秩为2
+  Eigen::JacobiSVD<Eigen::Matrix3f> svd2(Fpre, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Vector3f singularvalues2 = svd2.singularValues();
+  Eigen::Matrix3f U2 = svd2.matrixU();
+  Eigen::Matrix3f V2 = svd2.matrixV();
+  Eigen::Matrix3f sigma;
+  sigma.setZero();
+  sigma(0, 0) = singularvalues2(0);
+  sigma(1, 1) = singularvalues2(1);
+  Eigen::Matrix3f F = U2 * sigma * V2.transpose();
+
+  // 4.2 本质矩阵分解，恢复R,t
+  // Multiple View Geometry in Computer Vision
+  Eigen::Matrix3f E = K_eigen.transpose() * F * K_eigen; // E = K.t()*F*K
+  Eigen::JacobiSVD<Eigen::Matrix3f> svdE(E, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Matrix3f Ue = svdE.matrixU();
+  Eigen::Matrix3f Ve = svdE.matrixV();
+  auto singularvaluesE = svdE.singularValues();
+
+  // 左奇异值矩阵U的最后一列是t，对其进行归一化
+  Eigen::Vector3f t = Ue.col(2);
+  t = t / t.norm();
+
+  // 构建W矩阵
+  Eigen::Matrix3f W = Eigen::Matrix3f::Identity();
+  W(0, 1) = -1;
+  W(1, 0) = 1;
+  W(2, 2) = 1;
+
+  Eigen::Matrix3f R1 = Ue * W * Ve.transpose();
+  if (R1.determinant() < 0) {
+    std::cout << "R1 det is < 0 take the opposite." << std::endl;
+    R1 = -R1;
+  }
+
+  Eigen::Matrix3f R2 = Ue * W.transpose() * Ve.transpose();
+  if (R2.determinant() < 0) {
+    std::cout << "R2 det is < 0 take the opposite." << std::endl;
+    R2 = -R2;
+  }
+
+  std::vector<Eigen::Matrix3f> Rs{R1, R1, R2, R2};
+  std::vector<Eigen::Vector3f> ts{t, -t, t, -t};
+
+  int max_value = 0;
+  int good_index = -1;
+  for (int i = 0; i < 4; i++) {
+    // std::cout << Rs[i] << std::endl;
+    int nGood = checkRT(Rs[i], ts[i], K_eigen, RR_matches, RR_keypoint01, RR_keypoint02);
+    if (nGood > max_value) {
+      max_value = nGood;
+      good_index = i;
+    }
+    std::cout << nGood << std::endl;
+  }
+
+  std::cout << "pose R21 is \n" << Rs[good_index] << std::endl;
+  std::cout << "pose t21 is \n" << ts[good_index] << std::endl;
+
   return 0;
+}
+
+Eigen::Vector3f triangulate(const cv::KeyPoint &p1, const cv::KeyPoint &p2,
+                            const Eigen::Matrix<float, 3, 4> &P1,
+                            const Eigen::Matrix<float, 3, 4> &P2) {
+  Eigen::Matrix4f A;
+  A.row(0) = p1.pt.x * P1.row(2) - P1.row(0);
+  A.row(1) = p1.pt.y * P1.row(2) - P1.row(1);
+  A.row(2) = p2.pt.x * P2.row(2) - P2.row(0);
+  A.row(3) = p2.pt.y * P2.row(2) - P2.row(1);
+
+  // SVD
+  Eigen::JacobiSVD<Eigen::Matrix4f> svd(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  Eigen::Vector4f X = svd.matrixV().col(3);
+  // 齐次坐标
+  return X.head(3) / X[3];
+}
+
+int checkRT(const Eigen::Matrix3f &R, const Eigen::Vector3f &t, const Eigen::Matrix3f &K,
+            const std::vector<cv::DMatch> &matches, const std::vector<cv::KeyPoint> &keypoints1,
+            const std::vector<cv::KeyPoint> &keypoints2) {
+  // 以第一个相机光心为世界坐标系，即：P1 = K*[I|0]
+  Eigen::Matrix<float, 3, 4> P1;
+  P1.block<3, 3>(0, 0) = K;
+  P1.col(3) = Eigen::Vector3f::Zero();
+  Eigen::Vector3f O1 = Eigen::Vector3f::Identity();
+  // std::cout << "P1: " << std::endl << P1 << std::endl;
+
+  // 第二个相机的投影矩阵 P2 = K*[R|t]
+  // 对极约束求解的是R21，t21
+  Eigen::Matrix<float, 3, 4> P2;
+  P2.block(0, 0, 3, 3) = R;
+  P2.col(3) = t;
+  P2 = K * P2;
+  // 第二个相机在第一个相机坐标系下的坐标
+  Eigen::Vector3f O2 = -R.transpose() * t;
+
+  int nGood = 0;
+  for (size_t i = 0; i < matches.size(); i++) {
+    const cv::KeyPoint &kp1 = keypoints1[matches[i].queryIdx];
+    const cv::KeyPoint &kp2 = keypoints2[matches[i].trainIdx];
+
+    Eigen::Vector3f X = triangulate(kp1, kp2, P1, P2);
+
+    Eigen::Vector3f normal1 = X - O1;
+    float dist1 = normal1.norm();
+
+    Eigen::Vector3f normal2 = X - O2;
+    float dist2 = normal2.norm();
+
+    // ab = |a||b|cos_theta
+    float cos_theta = (normal1.dot(normal2)) / (dist1 * dist2);
+    Eigen::Vector3f XinC2 = R * X + t;
+
+    if (X[2] < 0 || XinC2[2] < 0 || cos_theta > 0.99998) {
+      continue;
+    }
+
+    nGood++;
+  }
+
+  return nGood;
 }
