@@ -206,11 +206,33 @@ int main(int argc, char **argv) {
       max_value = nGood;
       good_index = i;
     }
-    std::cout << nGood << std::endl;
   }
 
-  std::cout << "pose R21 is \n" << Rs[good_index] << std::endl;
-  std::cout << "pose t21 is \n" << ts[good_index] << std::endl;
+  Eigen::Matrix3f R21 = Rs[good_index];
+  Eigen::Vector3f t21 = ts[good_index];
+
+  std::cout << "\n camera pose R21 is \n" << R21 << std::endl;
+  std::cout << "\n camera pose t21 is \n" << t21 << std::endl;
+
+  // 5 利用最优的R,t，对2D匹配点做三角化
+  // 以第一个相机光心为世界坐标系，即：P1 = K*[I|0]
+  Eigen::Matrix<float, 3, 4> P1;
+  P1.block<3, 3>(0, 0) = K_eigen;
+  P1.col(3) = Eigen::Vector3f::Zero();
+
+  // 第二个相机的投影矩阵 P2 = K*[R|t]
+  // 对极约束求解的是R21，t21
+  Eigen::Matrix<float, 3, 4> P2;
+  P2.block(0, 0, 3, 3) = R21;
+  P2.col(3) = t21;
+  P2 = K_eigen * P2;
+
+  std::vector<Eigen::Vector3f> p3ds;
+  for (int i = 0; i < RR_matches.size(); i++) {
+    Eigen::Vector3f p3d = triangulate(RR_keypoint01[RR_matches[i].queryIdx],
+                                      RR_keypoint02[RR_matches[i].trainIdx], P1, P2);
+    p3ds.push_back(p3d);
+  }
 
   return 0;
 }
