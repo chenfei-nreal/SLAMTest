@@ -1,5 +1,6 @@
 #include <yaml-cpp/yaml.h>
 
+#include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <cassert>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include "SnavelyReprojectionError.h"
 
 Eigen::Vector3f triangulate(const cv::KeyPoint &p1, const cv::KeyPoint &p2,
                             const Eigen::Matrix<float, 3, 4> &P1,
@@ -177,7 +179,7 @@ int main(int argc, char **argv) {
   t = t / t.norm();
 
   // 构建W矩阵
-  Eigen::Matrix3f W = Eigen::Matrix3f::Identity();
+  Eigen::Matrix3f W = Eigen::Matrix3f::Zero();
   W(0, 1) = -1;
   W(1, 0) = 1;
   W(2, 2) = 1;
@@ -233,6 +235,55 @@ int main(int argc, char **argv) {
                                       RR_keypoint02[RR_matches[i].trainIdx], P1, P2);
     p3ds.push_back(p3d);
   }
+
+  // 6 Use Ceres solver
+  ceres::Problem problem;
+  const double &fx = K_eigen(0, 0);
+  const double &fy = K_eigen(1, 1);
+  const double &u0 = K_eigen(0, 2);
+  const double &v0 = K_eigen(1, 2);
+
+  Eigen::AngleAxisf angleAxis1(Eigen::Matrix3f::Identity());
+  Eigen::AngleAxisf angleAxis2(R21);
+
+  Eigen::Vector3f aa1 = angleAxis1.angle() * angleAxis1.axis();
+  Eigen::Vector3f aa2 = angleAxis2.angle() * angleAxis2.axis();
+
+  double camera1[] = {aa1[0], aa1[1], aa1[2], 0, 0, 0, fx, fy, u0, v0};
+  double camera2[] = {aa2[0], aa2[1], aa2[2], t21[0], t21[1], t21[2], fx, fy, u0, v0};
+
+  const int points_num = p3ds.size();
+  std::cout << std::endl;
+
+  double *point_parameters = new double[points_num * 3];
+
+  for (int i = 0; i < points_num; i++) {
+    point_parameters[i * 3 + 0] = p3ds[i][0];
+    point_parameters[i * 3 + 1] = p3ds[i][1];
+    point_parameters[i * 3 + 2] = p3ds[i][2];
+  }
+
+  ceres::LossFunction *loss_function = new ceres::HuberLoss(1.0);
+
+  for (int i = 0; i < points_num; i++) {
+    // ceres::CostFunction *cost_function1 = SnavelyReprojectionError::Create(
+    //   double(RR_keypoint01[i].pt.x), double(RR_keypoint01[i].pt.y));
+    // problem.AddResidualBlock(cost_function1, loss_function, camera1, point_parameters + i * 3);
+
+    ceres::CostFunction *cost_function2 = SnavelyReprojectionError::Create(
+      double(RR_keypoint02[i].pt.x), double(RR_keypoint02[i].pt.y));
+    problem.AddResidualBlock(cost_function2, loss_function, camera2, point_parameters + i * 3);
+  }
+
+  std::cout << "Solve ceres BA ... " << std::endl;
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::LinearSolverType::DENSE_QR;
+  options.minimizer_progress_to_stdout = true;
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &problem, &summary);
+  std::cout << summary.FullReport() << std::endl;
+
+  delete[] point_parameters;
 
   return 0;
 }
