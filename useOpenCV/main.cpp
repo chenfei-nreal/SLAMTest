@@ -249,8 +249,8 @@ int main(int argc, char **argv) {
   Eigen::Vector3f aa1 = angleAxis1.angle() * angleAxis1.axis();
   Eigen::Vector3f aa2 = angleAxis2.angle() * angleAxis2.axis();
 
-  double camera1[] = {aa1[0], aa1[1], aa1[2], 0, 0, 0, fx, fy, u0, v0};
-  double camera2[] = {aa2[0], aa2[1], aa2[2], t21[0], t21[1], t21[2], fx, fy, u0, v0};
+  double camera1[] = {aa1[0], aa1[1], aa1[2], 0, 0, 0};
+  double camera2[] = {aa2[0], aa2[1], aa2[2], t21[0], t21[1], t21[2]};
 
   const int points_num = p3ds.size();
   std::cout << std::endl;
@@ -266,19 +266,28 @@ int main(int argc, char **argv) {
   ceres::LossFunction *loss_function = new ceres::HuberLoss(1.0);
 
   for (int i = 0; i < points_num; i++) {
-    // ceres::CostFunction *cost_function1 = SnavelyReprojectionError::Create(
-    //   double(RR_keypoint01[i].pt.x), double(RR_keypoint01[i].pt.y));
-    // problem.AddResidualBlock(cost_function1, loss_function, camera1, point_parameters + i * 3);
-
+    // Automatic Derivatives
     ceres::CostFunction *cost_function2 = SnavelyReprojectionError::Create(
-      double(RR_keypoint02[i].pt.x), double(RR_keypoint02[i].pt.y));
+      double(RR_keypoint02[i].pt.x), double(RR_keypoint02[i].pt.y), fx, fy, u0, v0);
     problem.AddResidualBlock(cost_function2, loss_function, camera2, point_parameters + i * 3);
+
+    // Analytic Derivatives
+    // std::vector<double *> parameter_blocks;
+    // parameter_blocks.push_back(camera2);                  // rotation vector 3x1
+    // parameter_blocks.push_back(camera2 + 3);              // t 3x1
+    // parameter_blocks.push_back(point_parameters + i * 3); // point 3x1
+
+    // ceres::CostFunction *cost_function =
+    //   new customizedCostFunction(RR_keypoint02[i].pt.x, RR_keypoint02[i].pt.y, fx, fy, u0, v0);
+    // problem.AddResidualBlock(cost_function, loss_function, parameter_blocks);
   }
 
   std::cout << "Solve ceres BA ... " << std::endl;
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::LinearSolverType::DENSE_QR;
   options.minimizer_progress_to_stdout = true;
+  options.check_gradients = true;
+  options.gradient_check_relative_precision = 1e-5;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
   std::cout << summary.FullReport() << std::endl;
