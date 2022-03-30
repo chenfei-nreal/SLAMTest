@@ -84,6 +84,10 @@ class customizedCostFunction : public ceres::SizedCostFunction<2, 3, 3, 3> {
     // camera pose
     Eigen::Map<const Eigen::Vector3d> rotation_vector(&parameters[0][0]);
     const Eigen::Matrix3d R = RotationVectorToRotationMatrix(rotation_vector);
+
+    // Eigen::Map<const Eigen::Quaterniond> _quaternion(&parameters[0][0]);
+    // const Eigen::Matrix3d R = _quaternion.toRotationMatrix();
+
     Eigen::Map<const Eigen::Vector3d> t(&parameters[1][0]);
 
     // point in world coordinates
@@ -115,7 +119,8 @@ class customizedCostFunction : public ceres::SizedCostFunction<2, 3, 3, 3> {
     if (jacobians[0] != nullptr) {
       Eigen::Map<Eigen::Matrix<double, 2, 3, Eigen::RowMajor>> J0(jacobians[0]);
       J0 = -partial_e_partial_Pc * skew(R * P) * RightJacobianSO3(-rotation_vector);
-      // J0 = -partial_e_partial_Pc * skew(R * P);
+      // J0.leftCols<3>() = -partial_e_partial_Pc * skew(R * P);
+      // J0.rightCols<1>().setZero();
     }
 
     if (jacobians[1] != nullptr) {

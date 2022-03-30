@@ -3,6 +3,7 @@
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <cassert>
+#include <fstream>
 #include <iostream>
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d.hpp>
@@ -10,6 +11,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include "SnavelyReprojectionError.h"
+#include "pose_local_parameterization.h"
 
 Eigen::Vector3f triangulate(const cv::KeyPoint &p1, const cv::KeyPoint &p2,
                             const Eigen::Matrix<float, 3, 4> &P1,
@@ -257,6 +259,16 @@ int main(int argc, char **argv) {
 
   double *point_parameters = new double[points_num * 3];
 
+  // quaternion pose
+  // w x y z
+  // double _quaternion[4];
+  // AngleAxisToQuaternion<double>(camera2, _quaternion);
+  // double quaternion_pose[4];
+  // quaternion_pose[0] = _quaternion[1];
+  // quaternion_pose[1] = _quaternion[2];
+  // quaternion_pose[2] = _quaternion[3];
+  // quaternion_pose[3] = _quaternion[0];
+
   for (int i = 0; i < points_num; i++) {
     point_parameters[i * 3 + 0] = p3ds[i][0];
     point_parameters[i * 3 + 1] = p3ds[i][1];
@@ -264,22 +276,27 @@ int main(int argc, char **argv) {
   }
 
   ceres::LossFunction *loss_function = new ceres::HuberLoss(1.0);
+  // ceres::LocalParameterization *local_parameterization = new QuaternionLocalParameterization();
 
   for (int i = 0; i < points_num; i++) {
     // Automatic Derivatives
-    ceres::CostFunction *cost_function2 = SnavelyReprojectionError::Create(
-      double(RR_keypoint02[i].pt.x), double(RR_keypoint02[i].pt.y), fx, fy, u0, v0);
-    problem.AddResidualBlock(cost_function2, loss_function, camera2, point_parameters + i * 3);
+    // ceres::CostFunction *cost_function2 = SnavelyReprojectionError::Create(
+    //   double(RR_keypoint02[i].pt.x), double(RR_keypoint02[i].pt.y), fx, fy, u0, v0);
+    // problem.AddResidualBlock(cost_function2, loss_function, camera2, point_parameters + i * 3);
 
     // Analytic Derivatives
-    // std::vector<double *> parameter_blocks;
-    // parameter_blocks.push_back(camera2);                  // rotation vector 3x1
-    // parameter_blocks.push_back(camera2 + 3);              // t 3x1
-    // parameter_blocks.push_back(point_parameters + i * 3); // point 3x1
+    std::vector<double *> parameter_blocks;
 
-    // ceres::CostFunction *cost_function =
-    //   new customizedCostFunction(RR_keypoint02[i].pt.x, RR_keypoint02[i].pt.y, fx, fy, u0, v0);
-    // problem.AddResidualBlock(cost_function, loss_function, parameter_blocks);
+    // problem.AddParameterBlock(quaternion_pose, 4, local_parameterization);
+    // parameter_blocks.push_back(quaternion_pose);
+
+    parameter_blocks.push_back(camera2);                  // rotation vector 3x1
+    parameter_blocks.push_back(camera2 + 3);              // t 3x1
+    parameter_blocks.push_back(point_parameters + i * 3); // point 3x1
+
+    ceres::CostFunction *cost_function =
+      new customizedCostFunction(RR_keypoint02[i].pt.x, RR_keypoint02[i].pt.y, fx, fy, u0, v0);
+    problem.AddResidualBlock(cost_function, loss_function, parameter_blocks);
   }
 
   std::cout << "Solve ceres BA ... " << std::endl;
@@ -290,7 +307,69 @@ int main(int argc, char **argv) {
   options.gradient_check_relative_precision = 1e-5;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
-  std::cout << summary.FullReport() << std::endl;
+  std::cout << std::endl;
+  // std::cout << summary.FullReport() << std::endl;
+  Eigen::Vector3d rotation_vector_optimized, t_optimized;
+  rotation_vector_optimized << camera2[0], camera2[1], camera2[2];
+  t_optimized << camera2[3], camera2[4], camera2[5];
+
+  // Eigen::Quaterniond q_optimized;
+  // q_optimized.x() = quaternion_pose[0];
+  // q_optimized.y() = quaternion_pose[1];
+  // q_optimized.z() = quaternion_pose[2];
+  // q_optimized.w() = quaternion_pose[3];
+  // Eigen::Matrix3d R_optimized = q_optimized.toRotationMatrix();
+
+  Eigen::Matrix3d R_optimized = RotationVectorToRotationMatrix(rotation_vector_optimized);
+
+  // 计算重投影误差统计值
+  std::vector<std::vector<double>> errors(points_num, std::vector<double>(2, 0));
+  double u_average = 0.0;
+  double v_average = 0.0;
+
+  for (int i = 0; i < points_num; i++) {
+    Eigen::Vector3d p_optimized;
+    p_optimized << *(point_parameters + i * 3), *(point_parameters + i * 3 + 1),
+      *(point_parameters + i * 3 + 2);
+
+    Eigen::Vector3d p_camera_optimized = R_optimized * p_optimized + t_optimized;
+    // Eigen::Vector3f p_camera_optimized = R21 * p3ds[i] + t21;
+
+    double xp = p_camera_optimized[0] / p_camera_optimized[2];
+    double yp = p_camera_optimized[1] / p_camera_optimized[2];
+
+    errors[i][0] = RR_keypoint02[i].pt.x - (fx * xp + u0);
+    errors[i][1] = RR_keypoint02[i].pt.y - (fy * yp + v0);
+    u_average += errors[i][0];
+    v_average += errors[i][1];
+  }
+
+  u_average /= points_num;
+  v_average /= points_num;
+
+  double sigmau = 0;
+  double sigmav = 0;
+  for (int i = 0; i < points_num; i++) {
+    sigmau += (errors[i][0] - u_average) * (errors[i][0] - u_average);
+    sigmav += (errors[i][1] - v_average) * (errors[i][1] - v_average);
+  }
+  sigmau /= points_num;
+  sigmav /= points_num;
+
+  double su = sqrt(sigmau);
+  double sv = sqrt(sigmav);
+
+  std::cout << "u: average    sigma    S:\n"
+            << u_average << "  " << sigmau << "  " << su << "  " << std::endl;
+  std::cout << std::endl;
+  std::cout << "v: average    sigma    S:\n"
+            << v_average << "  " << sigmav << "  " << sv << "  " << std::endl;
+
+  // 残差写入txt文件
+  std::ofstream fout("errors.txt");
+  for (int i = 0; i < points_num; i++) {
+    fout << errors[i][0] << " " << errors[i][1] << std::endl;
+  }
 
   delete[] point_parameters;
 

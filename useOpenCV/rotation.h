@@ -8,13 +8,25 @@
 //////////////////////////////////////////////////////////////////
 // math functions needed for rotation conversion.
 
-Eigen::Matrix3d skew(const Eigen::Vector3d &w) {
+inline Eigen::Quaterniond deltaQ(const Eigen::Vector3d &theta) {
+
+  Eigen::Quaterniond dq;
+  Eigen::Vector3d half_theta = theta;
+  half_theta /= 2.0;
+  dq.w() = 1.0;
+  dq.x() = half_theta.x();
+  dq.y() = half_theta.y();
+  dq.z() = half_theta.z();
+  return dq;
+}
+
+inline Eigen::Matrix3d skew(const Eigen::Vector3d &w) {
   Eigen::Matrix3d skew_w;
   skew_w << 0, -w(2), w(1), w(2), 0, -w(0), -w(1), w(0), 0;
   return skew_w;
 }
 
-Eigen::Matrix3d RotationVectorToRotationMatrix(Eigen::Vector3d ax) {
+inline Eigen::Matrix3d RotationVectorToRotationMatrix(Eigen::Vector3d ax) {
   const double theta = sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
   const Eigen::Matrix3d W = skew(ax) / theta;
   const double sintheta = sin(theta);
@@ -25,22 +37,21 @@ Eigen::Matrix3d RotationVectorToRotationMatrix(Eigen::Vector3d ax) {
   return R;
 }
 
-Eigen::Matrix3d RightJacobianSO3(const double &x, const double &y, const double &z) {
+inline Eigen::Matrix3d RightJacobianSO3(const double &x, const double &y, const double &z) {
   Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
   const double d2 = x * x + y * y + z * z;
   const double d = sqrt(d2);
   Eigen::Vector3d v;
   v << x, y, z;
   Eigen::Matrix3d W = skew(v);
-  if(d < 1e-6) {
+  if (d < 1e-6) {
     return I;
-  }
-  else {
-    return I - W*(1.0f-cos(d))/d2 + W*W*(d-sin(d))/(d2*d);
+  } else {
+    return I - W * (1.0f - cos(d)) / d2 + W * W * (d - sin(d)) / (d2 * d);
   }
 }
 
-Eigen::Matrix3d RightJacobianSO3(const Eigen::Vector3d &v) {
+inline Eigen::Matrix3d RightJacobianSO3(const Eigen::Vector3d &v) {
   return RightJacobianSO3(v[0], v[1], v[2]);
 }
 
